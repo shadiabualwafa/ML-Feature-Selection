@@ -1,0 +1,310 @@
+---
+title: "Third_project"
+output: html_document
+---
+
+
+This report presents a comparative evaluation of five regression modeling techniques which are: Forward Selection, Backward Elimination, Ridge Regression, Lasso Regression, and Principal Components Regression (PCR) across five distinct datasets with different levels of predictor dimensionality, ranging from 12 to 500 predictor. Each method was assessed using a consistent validation framework based on a 30% hold-out test set. Key performance metrics included test RMSE, R-Squared, model size, and run time. The optimal method for each dataset was selected based on a balanced consideration of predictive accuracy, model interpretability, and computational efficiency. The results reveal distinct performance patterns influenced by dataset complexity and dimensionality.
+
+
+```{r}
+# import require libraries
+library(leaps)       # For best subset selection
+library(glmnet)      # For ridge and lasso regression
+library(pls)         # For principal component regression (PCR)
+library(tidyverse)   # Data wrangling and manipulation
+library(caret)       # For data partitioning
+library(tictoc)      # To measure computation time
+library(Metrics)
+library(dplyr)
+library(future)
+library(pls)
+```
+
+
+Data set
+```{r}
+# Read Data set
+ds_1 = (read.csv("D:\\Masters\\Special Topics\\Assignments\\Assignments 3\\D1_saas_churn.csv"))
+
+ds_2 = read.csv("D:\\Masters\\Special Topics\\Assignments\\Assignments 3\\D2_retail_marketing.csv")
+
+
+ds_3 = read.csv("D:\\Masters\\Special Topics\\Assignments\\Assignments 3\\D3_credit_portfolio.csv")
+
+ds_4 = read.csv("D:\\Masters\\Special Topics\\Assignments\\Assignments 3\\D4_web_session.csv")
+
+ds_5 = read.csv("D:\\Masters\\Special Topics\\Assignments\\Assignments 3\\D5_kpi_dashboard.csv")
+```
+
+Forward, and Backward Selection
+```{r}
+run_subset_selection <- function(ds, target_col, method = c("exhaustive", "forward", "backward")) {
+  set.seed(123)
+  
+    # Split into train (70%) and test (30%)
+  train_idx <- createDataPartition(ds[[target_col]], p = 0.7, list = FALSE)
+  train_data <- ds[train_idx, ]
+  test_data  <- ds[-train_idx, ]
+  
+  # Prepare formula
+  predictors <- setdiff(names(ds), target_col)
+  fmla <- as.formula(paste(target_col, "~", paste(predictors, collapse = "+")))
+  
+  # Time the model selection process
+  start_time <- Sys.time()
+  
+   # Perform model selection
+  regfit <- regsubsets(fmla,
+                       data = train_data,
+                       nvmax = length(predictors),
+                       method = method,
+                       really.big = TRUE)
+  
+  
+  end_time <- Sys.time()
+  cv_time_sec <- as.numeric(difftime(end_time, start_time, units = "secs"))
+  
+  # Get summary of model performance
+  reg_summary <- summary(regfit)
+  best_model_size <- which.max(reg_summary$adjr2)
+  
+  # Get coefficients of best model
+  best_coef <- coef(regfit, id = best_model_size)
+  selected_vars <- names(best_coef)[-1]  # remove intercept
+  
+  # Fit model with selected predictors on training data
+  final_model <- lm(as.formula(paste(target_col, "~", paste(selected_vars, collapse = "+"))),
+                    data = train_data)
+  
+  # Predict on test data
+  test_pred <- predict(final_model, newdata = test_data)
+  test_actual <- test_data[[target_col]]
+  
+  # Calculate metrics
+  test_RMSE <- rmse(test_actual, test_pred)
+  test_R2 <- 1 - sum((test_pred - test_actual)^2) / sum((test_actual - mean(test_actual))^2)
+  model_size <- length(selected_vars)
+  
+  # Return results
+  return(data.frame(
+    method = method,
+    test_RMSE = round(test_RMSE,4),
+    test_R2 = round(test_R2,4),
+    model_size = model_size,
+    cv_time_sec = round(cv_time_sec, 4)
+  ))
+}
+
+results_forward_ds1 = run_subset_selection(ds_1, target_col = "y", method = "forward")
+results_backward_ds1 = run_subset_selection(ds_1, target_col = "y", method = "backward")
+
+results_forward_ds2 = run_subset_selection(ds_2, target_col = "y", method = "forward")
+results_backward_ds2 = run_subset_selection(ds_2, target_col = "y", method = "backward")
+
+results_forward_ds3 = run_subset_selection(ds_3, target_col = "y", method = "forward")
+results_backward_ds3 = run_subset_selection(ds_3, target_col = "y", method = "backward")
+
+results_forward_ds4 = run_subset_selection(ds_4, target_col = "y", method = "forward")
+results_backward_ds4 = run_subset_selection(ds_4, target_col = "y", method = "backward")
+
+results_forward_ds5 = run_subset_selection(ds_5, target_col = "y", method = "forward")
+results_backward_ds5 = run_subset_selection(ds_5, target_col = "y", method = "backward")
+```
+
+
+Ridge regression
+```{r}
+ridge_regression <- function(ds, target_col) {
+
+
+  # Set seed for reproducibility
+  set.seed(123)
+
+  # Separate predictors and target
+  predictors <- setdiff(names(ds), target_col)
+  X <- as.matrix(ds[, predictors])
+  y <- ds[[target_col]]
+
+  # Train-test split (70/30)
+  train_idx <- sample(1:nrow(ds), size = 0.7 * nrow(ds))
+  X_train <- X[train_idx, ]
+  y_train <- y[train_idx]
+  X_test  <- X[-train_idx, ]
+  y_test  <- y[-train_idx]
+
+  # Time the cross-validation process
+  start_time <- Sys.time()
+
+  # 10-fold CV for Ridge (alpha = 0)
+  cv_ridge <- cv.glmnet(
+    x = X_train,
+    y = y_train,
+    alpha = 0,
+    nfolds = 10,
+    standardize = TRUE
+  )
+
+  end_time <- Sys.time()
+  cv_time_sec <- as.numeric(difftime(end_time, start_time, units = "secs"))
+
+  # Fit final model with best lambda
+  best_lambda <- cv_ridge$lambda.min
+  final_model <- glmnet(X_train, y_train, alpha = 0, lambda = best_lambda)
+
+  # Predict on test set
+  predictions <- predict(final_model, s = best_lambda, newx = X_test)
+
+  # Compute metrics
+  test_RMSE <- sqrt(mean((y_test - predictions)^2))
+  SST <- sum((y_test - mean(y_test))^2)
+  SSE <- sum((y_test - predictions)^2)
+  test_R2 <- 1 - SSE / SST
+  model_size <- ncol(X_train)  # all predictors are used in ridge
+
+  # Return as list
+  return(list(
+    test_RMSE = round(test_RMSE, 4),
+    test_R2 = round(test_R2, 4),
+    model_size = model_size,
+    cv_time_sec = round(cv_time_sec, 4)
+  ))
+}
+
+ridge_ds1 <- ridge_regression(ds_1, "y")
+ridge_ds2 <- ridge_regression(ds_2, "y")
+ridge_ds3 <- ridge_regression(ds_3, "y")
+ridge_ds4 <- ridge_regression(ds_4, "y")
+ridge_ds5 <- ridge_regression(ds_5, "y")
+```
+
+
+Lasso
+```{r}
+lasso_regression <- function(ds, target_col) {
+
+  # Set seed for reproducibility
+  set.seed(123)
+
+  # Separate predictors and target
+  predictors <- setdiff(names(ds), target_col)
+  X <- as.matrix(ds[, predictors])
+  y <- ds[[target_col]]
+
+  # Train/test split (70/30)
+  train_idx <- sample(1:nrow(ds), size = 0.7 * nrow(ds))
+  X_train <- X[train_idx, ]
+  y_train <- y[train_idx]
+  X_test  <- X[-train_idx, ]
+  y_test  <- y[-train_idx]
+
+  # Start timing
+  start_time <- Sys.time()
+
+  # Perform 10-fold CV for Lasso (alpha = 1)
+  cv_lasso <- cv.glmnet(
+    x = X_train,
+    y = y_train,
+    alpha = 1,
+    nfolds = 10,
+    standardize = TRUE
+  )
+
+  end_time <- Sys.time()
+  cv_time_sec <- as.numeric(difftime(end_time, start_time, units = "secs"))
+
+  # Use best lambda
+  best_lambda <- cv_lasso$lambda.min
+  final_model <- glmnet(X_train, y_train, alpha = 1, lambda = best_lambda)
+
+  # Predict on test set
+  predictions <- predict(final_model, s = best_lambda, newx = X_test)
+
+  # Compute metrics
+  test_RMSE <- sqrt(mean((y_test - predictions)^2))
+  SST <- sum((y_test - mean(y_test))^2)
+  SSE <- sum((y_test - predictions)^2)
+  test_R2 <- 1 - SSE / SST
+
+  # Number of predictors used (non-zero coefficients)
+  model_coeffs <- coef(final_model)
+  model_size <- sum(model_coeffs[-1] != 0)  # exclude intercept
+
+  # Return as named list
+  return(list(
+    test_RMSE = round(test_RMSE, 4),
+    test_R2 = round(test_R2, 4),
+    model_size = model_size,
+    cv_time_sec = round(cv_time_sec, 4)
+  ))
+}
+
+
+lasso_ds1 <- lasso_regression(ds_1, "y")
+lasso_ds2 <- lasso_regression(ds_2, "y")
+lasso_ds3 <- lasso_regression(ds_3, "y")
+lasso_ds4 <- lasso_regression(ds_4, "y")
+lasso_ds5 <- lasso_regression(ds_5, "y")
+```
+
+
+
+PCR
+```{r}
+pcr_regression <- function(ds, target_col) {
+  set.seed(123)
+
+  # Split data: 70% train / 30% test
+  train_idx <- createDataPartition(ds[[target_col]], p = 0.7, list = FALSE)
+  train_data <- ds[train_idx, ]
+  test_data  <- ds[-train_idx, ]
+
+  predictors <- setdiff(names(ds), target_col)
+  formula <- as.formula(paste(target_col, "~", paste(predictors, collapse = "+")))
+
+  # Start timing
+  start_time <- Sys.time()
+
+  # Fit PCR with 10-fold CV
+  pcr_model <- pcr(
+    formula,
+    data = train_data,
+    scale = TRUE,
+    validation = "CV",
+    segments = 10
+  )
+
+  end_time <- Sys.time()
+  cv_time_sec <- as.numeric(difftime(end_time, start_time, units = "secs"))
+
+  # Find optimal number of components
+  opt_ncomp <- which.min(pcr_model$validation$PRESS)
+
+  # Predict on test set using optimal components
+  preds <- predict(pcr_model, newdata = test_data, ncomp = opt_ncomp)
+  actuals <- test_data[[target_col]]
+
+  # Compute metrics
+  test_RMSE <- sqrt(mean((actuals - preds)^2))
+  SST <- sum((actuals - mean(actuals))^2)
+  SSE <- sum((actuals - preds)^2)
+  test_R2 <- 1 - SSE / SST
+
+  # Return results
+  return(list(
+    test_RMSE = round(test_RMSE, 4),
+    test_R2 = round(test_R2, 4),
+    model_size = opt_ncomp,
+    cv_time_sec = round(cv_time_sec, 4)
+  ))
+}
+
+pcr_ds1 <- pcr_regression(ds_1, "y")
+pcr_ds2 <- pcr_regression(ds_2, "y")
+pcr_ds3 <- pcr_regression(ds_3, "y")
+pcr_ds4 <- pcr_regression(ds_4, "y")
+pcr_ds5 <- pcr_regression(ds_5, "y")
+pcr_ds5
+```
+
+
